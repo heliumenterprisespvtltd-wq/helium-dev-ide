@@ -1,12 +1,13 @@
 import React, { useRef, useEffect, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import { Terminal as TerminalIcon, Monitor, Maximize2, Layout } from 'lucide-react';
+import { Terminal as TerminalIcon, Monitor, Maximize2, Layout, Send } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
 import './App.css';
 
 type Tab = 'explorer' | 'remote' | 'settings' | 'git' | 'docker' | 'notes';
+type Message = { role: 'system' | 'user' | 'assistant'; content: string };
 
 function App() {
   const [code, setCode] = useState<string>('// Welcome to Helium Dev IDE\nconsole.log("Hello World");');
@@ -15,6 +16,19 @@ function App() {
   const [showPreview, setShowPreview] = useState<boolean>(false);
   const terminalRef = useRef<HTMLDivElement>(null);
   
+  // AI Settings State
+  const [cloudKey, setCloudKey] = useState<string>('');
+  const [localEndpoint, setLocalEndpoint] = useState<string>('http://localhost:11434');
+  const [localModel, setLocalModel] = useState<string>('glm-5.2-latest');
+  const [autoFallback, setAutoFallback] = useState<boolean>(true);
+  
+  // AI Chat State
+  const [chatHistory, setChatHistory] = useState<Message[]>([
+    { role: 'system', content: 'How can I help you code today?' }
+  ]);
+  const [chatInput, setChatInput] = useState<string>('');
+  const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+
   useEffect(() => {
     if (!terminalRef.current) return;
     const term = new Terminal({
@@ -36,6 +50,72 @@ function App() {
     window.addEventListener('resize', handleResize);
     return () => { window.removeEventListener('resize', handleResize); term.dispose(); };
   }, [zenMode, showPreview]);
+
+  // AI Logic
+  const handleAiSubmit = async (e?: React.KeyboardEvent | React.MouseEvent) => {
+    if (e && 'key' in e && e.key !== 'Enter') return;
+    if (!chatInput.trim() || isAiLoading) return;
+
+    const userMsg: Message = { role: 'user', content: chatInput };
+    const newHistory = [...chatHistory, userMsg];
+    setChatHistory(newHistory);
+    setChatInput('');
+    setIsAiLoading(true);
+
+    let useCloud = cloudKey.trim().length > 0;
+    
+    try {
+      let response;
+      if (useCloud) {
+        // Attempt OpenRouter
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${cloudKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'meta-llama/llama-3-8b-instruct:free', // Default free model for testing
+            messages: newHistory.filter(m => m.role !== 'system')
+          })
+        });
+
+        // Fallback Logic
+        if (!response.ok && autoFallback) {
+          console.warn("Cloud AI failed, falling back to Local GLM...");
+          useCloud = false;
+        }
+      }
+
+      if (!useCloud) {
+        // Attempt Local API (Ollama standard format)
+        response = await fetch(`${localEndpoint}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: localModel,
+            messages: newHistory.filter(m => m.role !== 'system'),
+            stream: false
+          })
+        });
+      }
+
+      if (!response || !response.ok) throw new Error("AI Request Failed");
+      
+      const data = await response.json();
+      const assistantText = useCloud 
+        ? data.choices[0].message.content 
+        : data.message.content; // Ollama format
+
+      setChatHistory(prev => [...prev, { role: 'assistant', content: assistantText }]);
+
+    } catch (err) {
+      console.error(err);
+      setChatHistory(prev => [...prev, { role: 'assistant', content: '❌ Connection failed. Check your API key or ensure your Local AI server is running.' }]);
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
 
   return (
     <div className={`ide-container ${zenMode ? 'zen-mode' : ''}`}>
@@ -76,10 +156,6 @@ function App() {
                   <input type="password" className="codex-input" placeholder="Password or Key" />
                   <button className="codex-btn">Connect SSH</button>
                 </div>
-                <div className="remote-connections">
-                  <div className="sidebar-item"><span className="status-indicator offline"></span> production-server</div>
-                  <div className="sidebar-item active"><span className="status-indicator online"></span> dev-box (10.0.0.5)</div>
-                </div>
               </div>
             )}
 
@@ -87,7 +163,6 @@ function App() {
               <div className="sidebar-items remote-panel">
                 <div className="remote-title">Source Control</div>
                 <div className="sidebar-item" style={{color:'#ef4444'}}>M App.tsx</div>
-                <div className="sidebar-item" style={{color:'#4ade80'}}>U utils.ts</div>
                 <div className="remote-form" style={{marginTop: 10}}>
                   <input type="text" className="codex-input" placeholder="Commit message" />
                   <button className="codex-btn">Commit & Push</button>
@@ -99,15 +174,13 @@ function App() {
               <div className="sidebar-items remote-panel">
                 <div className="remote-title">Containers</div>
                 <div className="sidebar-item"><span className="status-indicator online"></span> redis-db (Port 6379)</div>
-                <div className="sidebar-item"><span className="status-indicator online"></span> postgres-main (Port 5432)</div>
-                <div className="sidebar-item"><span className="status-indicator offline"></span> web-frontend (Exited)</div>
               </div>
             )}
 
             {activeTab === 'notes' && (
               <div className="sidebar-items remote-panel">
                 <div className="remote-title">Scratchpad</div>
-                <textarea className="codex-input" style={{height: '200px', resize: 'none'}} defaultValue="- Write API for auth\n- Check docker logs\n- Deploy to VPS" />
+                <textarea className="codex-input" style={{height: '200px', resize: 'none'}} defaultValue="- Write API for auth\n- Check docker logs" />
               </div>
             )}
 
@@ -116,36 +189,18 @@ function App() {
                 <div className="remote-title">AI Config</div>
                 <div className="remote-form">
                   <label style={{ fontSize: '11px', color: '#888' }}>Cloud API Key (OpenRouter / OpenAI)</label>
-                  <input type="password" className="codex-input" placeholder="sk-or-v1-..." />
+                  <input type="password" value={cloudKey} onChange={e => setCloudKey(e.target.value)} className="codex-input" placeholder="sk-or-v1-..." />
                   
-                  <label style={{ fontSize: '11px', color: '#888', marginTop: '10px' }}>Local Offline Model (GLM 5.2)</label>
-                  <input type="text" className="codex-input" defaultValue="http://localhost:11434" />
-                  <input type="text" className="codex-input" defaultValue="glm-5.2-latest" />
+                  <label style={{ fontSize: '11px', color: '#888', marginTop: '10px' }}>Local Offline Model (GLM 5.2 / Ollama)</label>
+                  <input type="text" value={localEndpoint} onChange={e => setLocalEndpoint(e.target.value)} className="codex-input" placeholder="Local Endpoint URL" />
+                  <input type="text" value={localModel} onChange={e => setLocalModel(e.target.value)} className="codex-input" placeholder="Model Name" />
                   
                   <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input type="checkbox" defaultChecked />
+                      <input type="checkbox" checked={autoFallback} onChange={e => setAutoFallback(e.target.checked)} />
                       Auto-fallback to Offline Model if no internet
                     </label>
                   </div>
-
-                  <div className="remote-title" style={{ marginTop: '10px' }}>AI Permissions</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input type="radio" name="ai-access" value="review" defaultChecked />
-                      Review First (Ask before actions)
-                    </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input type="radio" name="ai-access" value="decisions" />
-                      AI Decisions (Auto-choose tools)
-                    </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input type="radio" name="ai-access" value="full" />
-                      Full Access (No limits, execute all)
-                    </label>
-                  </div>
-
-                  <button className="codex-btn" style={{ marginTop: '10px' }}>Save Config</button>
                 </div>
               </div>
             )}
@@ -184,7 +239,7 @@ function App() {
             </div>
             <div className="preview-content">
               <div style={{display:'flex', height:'100%', alignItems:'center', justifyContent:'center', color:'#888'}}>
-                Web Preview Loaded (http://localhost:8080)
+                Web Preview Loaded
               </div>
             </div>
           </div>
@@ -193,12 +248,34 @@ function App() {
         {/* AI Sidebar */}
         {!zenMode && (
           <div className="ai-sidebar">
-            <div className="ai-sidebar-header">ANTIGRAVITY (GLM 5.2)</div>
+            <div className="ai-sidebar-header">ANTIGRAVITY AI</div>
             <div className="ai-chat-area">
-              <div className="ai-message system">How can I help you code today?</div>
+              {chatHistory.map((msg, idx) => (
+                <div key={idx} className={`ai-message ${msg.role === 'user' ? 'user-msg' : 'system'}`} style={msg.role === 'user' ? {background: '#27272a', border: '1px solid #3f3f46'} : {}}>
+                  {msg.content}
+                </div>
+              ))}
+              {isAiLoading && (
+                <div className="ai-message system" style={{opacity: 0.7}}>Thinking...</div>
+              )}
             </div>
-            <div className="ai-input-area">
-              <input type="text" className="ai-input" placeholder="Ask AI to write code..." />
+            <div className="ai-input-area" style={{ display: 'flex', gap: '8px' }}>
+              <input 
+                type="text" 
+                className="ai-input" 
+                placeholder="Ask AI to write code..." 
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={handleAiSubmit}
+                disabled={isAiLoading}
+              />
+              <button 
+                onClick={handleAiSubmit}
+                disabled={isAiLoading || !chatInput.trim()}
+                className="icon-btn" 
+                style={{ background: 'var(--codex-accent)', color: '#fff', padding: '0 12px', borderRadius: '20px' }}>
+                <Send size={14} />
+              </button>
             </div>
           </div>
         )}
